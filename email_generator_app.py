@@ -3,275 +3,223 @@ import google.generativeai as genai
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 import os
+import re
 from dotenv import load_dotenv
 
-# Load environment variables
+# ============ LOAD ENVIRONMENT VARIABLES ============
 load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
+sender_email = os.getenv("SENDER_EMAIL")
+sender_password = os.getenv("SENDER_PASSWORD")
+smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+smtp_port = int(os.getenv("SMTP_PORT", 587))
 
-# Page configuration
-st.set_page_config(
-    page_title="AI Email Generator & Sender",
-    page_icon="✉️",
-    layout="wide"
-)
+# ============ PAGE CONFIG ============
+st.set_page_config(page_title="AI Email Assistant", page_icon="✉️", layout="centered")
 
-# Custom CSS for better styling
-st.markdown("""
-    <style>
-    .stButton>button {
-        background-color: #4CAF50;
-        color: white;
-        font-weight: bold;
-    }
-    .stTextArea>div>div>textarea {
-        font-size: 14px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# Initialize session state
-if 'generated_email' not in st.session_state:
+# ============ SESSION STATE ============
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "generated_email" not in st.session_state:
     st.session_state.generated_email = ""
-if 'email_subject' not in st.session_state:
+if "email_subject" not in st.session_state:
     st.session_state.email_subject = ""
+if "recipient_email" not in st.session_state:
+    st.session_state.recipient_email = ""
+if "attachments" not in st.session_state:
+    st.session_state.attachments = []
+if "awaiting_confirmation" not in st.session_state:
+    st.session_state.awaiting_confirmation = False
 
-def generate_email(prompt, api_key):
-    """Generate email using Google Gemini AI"""
+
+# ============ FUNCTIONS ============
+def generate_email(prompt, api_key, chat_history=None):
+    """Generate or refine email using Gemini API."""
     try:
-        # Configure Gemini AI
         genai.configure(api_key=api_key)
-        
-        # Initialize the model
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        # Enhanced prompt for better email generation
-        enhanced_prompt = f"""You are a professional email writer. Generate a well-formatted, professional email based on this request: {prompt}
-        
-        The email should:
-        1. Have an appropriate subject line (start with "Subject: ")
-        2. Include proper greeting
-        3. Have clear, concise body content
-        4. Include appropriate closing
-        5. Be professional and polite in tone
-        
-        Format the response with the subject line first (after "Subject: "), followed by the email body.
-        
-        User's request: {prompt}"""
-        
-        # Generate content
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        context = ""
+        if chat_history:
+            for msg in chat_history:
+                role = "User" if msg["role"] == "user" else "AI"
+                context += f"{role}: {msg['content']}\n"
+
+        enhanced_prompt = f"""
+        You are an AI email assistant that helps draft and refine professional emails.
+        Always use the following format:
+        Subject: <subject line>
+        <email body>
+
+        Fill in missing details by asking the user politely.
+        If the user requests to send or share an email, identify the recipient email and prepare for confirmation.
+        Use simple, polite English and business tone.
+
+        Conversation so far:
+        {context}
+        User: {prompt}
+        """
+
         response = model.generate_content(enhanced_prompt)
-        email_content = response.text
-        
-        # Extract subject and body
+        email_content = response.text.strip()
+
         if "Subject:" in email_content:
             parts = email_content.split("Subject:", 1)
-            if len(parts) > 1:
-                subject_and_body = parts[1].strip()
-                if "\n" in subject_and_body:
-                    subject = subject_and_body.split("\n", 1)[0].strip()
-                    body = subject_and_body.split("\n", 1)[1].strip()
-                else:
-                    subject = "Email from AI Generator"
-                    body = subject_and_body
+            subject_and_body = parts[1].strip()
+            if "\n" in subject_and_body:
+                subject = subject_and_body.split("\n", 1)[0].strip()
+                body = subject_and_body.split("\n", 1)[1].strip()
             else:
-                subject = "Email from AI Generator"
-                body = email_content
+                subject = "Email from AI Assistant"
+                body = subject_and_body
         else:
-            subject = "Email from AI Generator"
+            subject = "Email from AI Assistant"
             body = email_content
-            
+
         return subject, body
-        
+
     except Exception as e:
         return None, f"Error generating email: {str(e)}"
 
-def send_email(sender_email, sender_password, recipient_email, subject, body, smtp_server, smtp_port):
-    """Send email using SMTP"""
+
+def send_email(recipient_email, subject, body, attachments=None):
+    """Send email with optional attachments."""
     try:
-        # Create message
-        message = MIMEMultipart()
-        message["From"] = sender_email
-        message["To"] = recipient_email
-        message["Subject"] = subject
-        
-        # Add body to email
-        message.attach(MIMEText(body, "plain"))
-        
-        # Create SMTP session
+        msg = MIMEMultipart()
+        msg["From"] = sender_email
+        msg["To"] = recipient_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        if attachments:
+            for file in attachments:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(file.getvalue())
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", f"attachment; filename={file.name}")
+                msg.attach(part)
+
         with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()  # Enable TLS encryption
+            server.starttls()
             server.login(sender_email, sender_password)
-            text = message.as_string()
-            server.sendmail(sender_email, recipient_email, text)
-            
-        return True, "Email sent successfully!"
-        
+            server.sendmail(sender_email, recipient_email, msg.as_string())
+
+        return True, f"✅ Email successfully sent to {recipient_email}"
+
     except Exception as e:
-        return False, f"Error sending email: {str(e)}"
+        return False, f"❌ Failed to send email: {str(e)}"
 
-# Main UI
-st.title("🤖 AI Email Generator & Sender")
-st.markdown("Generate professional emails using AI and send them automatically!")
 
-# Sidebar for configuration
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    
-    # Gemini AI Configuration
-    st.subheader("Google Gemini AI Settings")
-    api_key = st.text_input("Gemini API Key", type="password", 
-                            value=os.getenv("GEMINI_API_KEY", ""),
-                            help="Enter your Google Gemini API key")
-    
-    st.divider()
-    
-    # Email Configuration
-    st.subheader("Email Settings")
-    
-    # SMTP Provider selection
-    smtp_provider = st.selectbox(
-        "Email Provider",
-        ["Gmail", "Outlook/Hotmail", "Yahoo", "Custom SMTP"]
-    )
-    
-    # Set SMTP settings based on provider
-    if smtp_provider == "Gmail":
-        smtp_server = "smtp.gmail.com"
-        smtp_port = 587
-        st.info("📌 For Gmail: Use an App Password instead of your regular password. Enable 2FA and generate an app password.")
-    elif smtp_provider == "Outlook/Hotmail":
-        smtp_server = "smtp-mail.outlook.com"
-        smtp_port = 587
-    elif smtp_provider == "Yahoo":
-        smtp_server = "smtp.mail.yahoo.com"
-        smtp_port = 587
-        st.info("📌 For Yahoo: Use an App Password instead of your regular password.")
-    else:
-        smtp_server = st.text_input("SMTP Server", value="smtp.gmail.com")
-        smtp_port = st.number_input("SMTP Port", value=587, min_value=1)
-    
-    sender_email = st.text_input("Your Email Address", 
-                                 value=os.getenv("SENDER_EMAIL", ""))
-    sender_password = st.text_input("Email Password/App Password", 
-                                   type="password",
-                                   value=os.getenv("SENDER_PASSWORD", ""),
-                                   help="Use App Password for Gmail/Yahoo")
+def detect_send_intent(prompt: str):
+    """Detect if user intends to send/share email."""
+    keywords = ["send", "share", "mail", "forward", "deliver", "dispatch"]
+    return any(kw in prompt.lower() for kw in keywords)
 
-# Main content area
-col1, col2 = st.columns([1, 1])
 
-with col1:
-    st.header("📝 Generate Email")
-    
-    # Email prompt input
-    prompt = st.text_area(
-        "Enter your email request:",
-        placeholder="Example: Write a professional leave request email for 2 days due to personal reasons",
-        height=100
-    )
-    
-    # Generate button
-    if st.button("🎯 Generate Email", type="primary"):
-        if not api_key:
-            st.error("Please enter your Gemini API key in the sidebar!")
-        elif not prompt:
-            st.error("Please enter a prompt for email generation!")
-        else:
-            with st.spinner("Generating email..."):
-                subject, body = generate_email(prompt, api_key)
-                if subject:
-                    st.session_state.email_subject = subject
-                    st.session_state.generated_email = body
-                    st.success("Email generated successfully!")
-                else:
-                    st.error(body)  # body contains error message in this case
-    
-    # Display generated email
-    if st.session_state.generated_email:
-        st.subheader("Generated Email Preview")
-        
-        # Editable subject
-        st.session_state.email_subject = st.text_input(
-            "Subject:",
-            value=st.session_state.email_subject
-        )
-        
-        # Editable email body
-        st.session_state.generated_email = st.text_area(
-            "Email Body:",
-            value=st.session_state.generated_email,
-            height=300
-        )
+# ============ CHAT DISPLAY ============
+st.title("🤖 AI Email Assistant")
+st.markdown("Chat naturally — draft, refine, and send emails. Add attachments and confirm before sending.")
 
-with col2:
-    st.header("📤 Send Email")
-    
-    if st.session_state.generated_email:
-        # Recipient email input
-        recipient_email = st.text_input(
-            "Recipient Email Address:",
-            placeholder="recipient@example.com"
-        )
-        
-        # Additional recipients (optional)
-        cc_recipients = st.text_input(
-            "CC (optional, comma-separated):",
-            placeholder="cc1@example.com, cc2@example.com"
-        )
-        
-        # Send button
-        if st.button("📧 Send Email", type="primary"):
-            if not sender_email or not sender_password:
-                st.error("Please configure your email settings in the sidebar!")
-            elif not recipient_email:
-                st.error("Please enter recipient email address!")
-            else:
-                with st.spinner("Sending email..."):
-                    success, message = send_email(
-                        sender_email,
-                        sender_password,
-                        recipient_email,
-                        st.session_state.email_subject,
-                        st.session_state.generated_email,
-                        smtp_server,
-                        smtp_port
-                    )
-                    
-                    if success:
-                        st.success(message)
-                        st.balloons()
-                        
-                        # Option to clear and start over
-                        if st.button("✨ Generate Another Email"):
-                            st.session_state.generated_email = ""
-                            st.session_state.email_subject = ""
-                            st.rerun()
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# ============ ATTACHMENT UI ============
+# if st.session_state.generated_email and not st.session_state.awaiting_confirmation:
+#     add_attachment = st.toggle("📎 Add attachment?")
+#     if add_attachment:
+#         uploaded_files = st.file_uploader("Upload your attachments", accept_multiple_files=True)
+#         if uploaded_files:
+#             st.session_state.attachments = uploaded_files
+#             st.success(f"{len(uploaded_files)} attachment(s) ready to include.")
+
+# ============ CHAT INPUT ============
+# ============ CHAT INPUT ============
+if api_key:
+    user_prompt = st.chat_input("Type something (e.g., 'Write an email to HR about leave', 'Send this to john@example.com')")
+
+    if user_prompt:
+        st.session_state.messages.append({"role": "user", "content": user_prompt})
+        with st.chat_message("user"):
+            st.markdown(user_prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                # Case 1: User is confirming send
+                if st.session_state.awaiting_confirmation:
+                    if user_prompt.lower().strip() in ["yes", "y"]:
+                        success, message = send_email(
+                            st.session_state.recipient_email,
+                            st.session_state.email_subject,
+                            st.session_state.generated_email,
+                            st.session_state.attachments,
+                        )
+                        st.session_state.awaiting_confirmation = False
+                        st.session_state.attachments = []
+                        st.session_state.messages.append({"role": "assistant", "content": message})
+                        st.markdown(message)
+
+                    elif user_prompt.lower().strip() in ["no", "n", "cancel"]:
+                        st.session_state.awaiting_confirmation = False
+                        msg = "❎ Email sending cancelled."
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                        st.markdown(msg)
                     else:
-                        st.error(message)
-                        if "Gmail" in smtp_provider:
-                            st.info("💡 Tip: Make sure you're using an App Password, not your regular Gmail password. You can generate one in your Google Account settings under Security > 2-Step Verification > App passwords.")
-    else:
-        st.info("👈 Generate an email first using the form on the left")
+                        st.warning("Please type 'yes' to send or 'no' to cancel.")
 
-# Footer
-st.divider()
-st.markdown("""
-    ### 📚 Instructions:
-    1. **Configure API Key**: Add your Google Gemini API key in the sidebar
-    2. **Setup Email**: Configure your email settings (use App Passwords for Gmail/Yahoo)
-    3. **Generate Email**: Enter a prompt and click Generate
-    4. **Review & Edit**: Review the generated email and edit if needed
-    5. **Send**: Enter recipient email and click Send
-    
-    ### 🔒 Security Notes:
-    - Never share your API keys or passwords
-    - Use App Passwords instead of regular passwords for Gmail/Yahoo
-    - Consider using environment variables for sensitive data
-    
-    ### 🔑 Getting Gemini API Key:
-    1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
-    2. Sign in with your Google account
-    3. Click "Create API Key"
-    4. Copy the key and add it to the app
-""")
+                # Case 2: Asking about attachments
+                elif "attachment" in user_prompt.lower() or "attach" in user_prompt.lower():
+                    uploaded_files = st.file_uploader("Upload your attachments here", accept_multiple_files=True)
+                    if uploaded_files:
+                        st.session_state.attachments = uploaded_files
+                        msg = f"📎 {len(uploaded_files)} attachment(s) added. Ready to send or continue editing?"
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                        st.markdown(msg)
+                    else:
+                        st.info("No attachments selected yet.")
+
+                # Case 3: Detect intent to send
+                elif detect_send_intent(user_prompt):
+                    match = re.search(r"[\w\.-]+@[\w\.-]+", user_prompt)
+                    if match:
+                        st.session_state.recipient_email = match.group(0)
+                    elif not st.session_state.recipient_email:
+                        msg = "Please provide the recipient’s email address."
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                        st.markdown(msg)
+                        st.stop()
+
+                    if not st.session_state.generated_email:
+                        msg = "⚠️ Please generate an email first. What should I write?"
+                        st.session_state.messages.append({"role": "assistant", "content": msg})
+                        st.markdown(msg)
+                    else:
+                        st.session_state.awaiting_confirmation = True
+                        confirm_msg = (
+                            f"### ✉️ Confirm Before Sending\n"
+                            f"**To:** {st.session_state.recipient_email}\n\n"
+                            f"**Subject:** {st.session_state.email_subject}\n\n"
+                            f"{st.session_state.generated_email}\n\n"
+                            f"Would you like me to send this? (yes/no)"
+                        )
+                        st.session_state.messages.append({"role": "assistant", "content": confirm_msg})
+                        st.markdown(confirm_msg)
+
+                # Case 4: Normal email generation/refinement
+                else:
+                    subject, body = generate_email(user_prompt, api_key, st.session_state.messages)
+                    if subject:
+                        st.session_state.email_subject = subject
+                        st.session_state.generated_email = body
+                        ai_reply = f"**Subject:** {subject}\n\n{body}\n\n"
+                        st.markdown(ai_reply)
+                        st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+                    else:
+                        st.markdown(body)
+                        st.session_state.messages.append({"role": "assistant", "content": body})
+else:
+    st.error("⚙️ Please set your GEMINI_API_KEY in the .env file to start chatting.")
+
